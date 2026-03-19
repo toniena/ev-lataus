@@ -14,8 +14,9 @@ hinta = 0
 if sopimus == "Kiinteä":
     hinta = st.number_input("Hinta €/kWh", value=0.10)
 
-start = st.datetime_input("Alku", datetime.now() - timedelta(hours=2))
-end = st.datetime_input("Loppu", datetime.now())
+
+start = start.replace(tzinfo=None)
+end = end.replace(tzinfo=None)
 
 kwh = st.number_input("kWh", value=20.0)
 
@@ -29,16 +30,17 @@ def fetch_prices():
     times = []
 
     for p in data["prices"]:
-        prices.append(p["value"] / 100)
+        prices.append(p["value"] / 100)  # snt -> €
         times.append(p["date"])
 
+    # Muodostetaan DataFrame ja poistetaan timezone
     df = pd.DataFrame({
-        "time": pd.to_datetime(times),
+        "time": pd.to_datetime(times).tz_localize(None),
         "price": prices
     })
 
     return df
-
+    
 # --- CALC ---
 def calc(df):
     df = df[(df["time"] >= start) & (df["time"] <= end)]
