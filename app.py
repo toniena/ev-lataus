@@ -5,135 +5,114 @@ from datetime import datetime, timedelta, time
 
 st.set_page_config(page_title="EV Latauskustannus", layout="centered")
 
+# --- ALUSTUS (Session State) ---
+# Alustetaan oletusajat vain kerran, jotta ne eivät nollaudu joka välissä
+if 'init_done' not in st.session_state:
+    now = datetime.now()
+    st.session_state.d_start = now.date()
+    st.session_state.t_start = (now - timedelta(hours=2)).time()
+    st.session_state.d_end = now.date()
+    st.session_state.t_end = now.time()
+    st.session_state.init_done = True
+
 st.title("🔋 Sähköauton latauskustannus")
 
 # --- INPUT ---
 sopimus = st.selectbox("Sopimus", ["Pörssisähkö", "Kiinteä"])
 
-# Kiinteä hinta (snt/kWh)
-hinta_snt = 0
-if sopimus == "Kiinteä":
-    hinta_snt = st.number_input("Sähkön hinta snt/kWh", value=10.0)
+col1, col2 = st.columns(2)
+with col1:
+    hinta_label = "Sähkön hinta snt/kWh" if sopimus == "Kiinteä" else "Marginaali snt/kWh"
+    hinta_val = 10.0 if sopimus == "Kiinteä" else 0.50
+    # Käytetään avainta (key), jotta arvo pysyy muistissa
+    lisa_hinta_snt = st.number_input(hinta_label, value=hinta_val)
 
-# Pörssisähkö marginaali (snt/kWh)
-marginaali_snt = 0
-if sopimus == "Pörssisähkö":
-    marginaali_snt = st.number_input("Marginaali snt/kWh", value=0.50)
+with col2:
+    siirto_snt = st.number_input("Siirtohinta snt/kWh", value=5.0)
 
-# Siirto (snt/kWh)
-siirto_snt = st.number_input("Siirtohinta snt/kWh", value=5.0)
-
-# Perusmaksu (snt/päivä)
-perusmaksu_snt = st.number_input("Perusmaksu snt/päivä", value=20.0)
+perus_col1, perus_col2 = st.columns(2)
+with perus_col1:
+    perusmaksu_snt = st.number_input("Perusmaksu snt/päivä", value=20.0)
+with perus_col2:
+    kwh = st.number_input("Ladattu määrä (kWh)", value=20.0)
 
 st.divider()
 
-# --- AJANKOHTA (Minuutin tarkkuudella) ---
+# --- AJANKOHTA (Pysyvä valinta) ---
 st.subheader("Valitse aikaväli")
-col1, col2 = st.columns(2)
+t_col1, t_col2 = st.columns(2)
 
-with col1:
-    d_start = st.date_input("Alkupäivä", datetime.now().date())
-    # step=60 mahdollistaa minuutin tarkan valinnan
-    t_start = st.time_input("Alkuaika", (datetime.now() - timedelta(hours=2)).time(), step=60)
+with t_col1:
+    # d_start ja t_start tallentuvat session_stateen automaattisesti 'key'-parametrilla
+    d_start = st.date_input("Alkupäivä", key="d_start")
+    t_start = st.time_input("Alkuaika", key="t_start", step=60)
 
-with col2:
-    d_end = st.date_input("Loppupäivä", datetime.now().date())
-    t_end = st.time_input("Loppuaika", datetime.now().time(), step=60)
+with t_col2:
+    d_end = st.date_input("Loppupäivä", key="d_end")
+    t_end = st.time_input("Loppuaika", key="t_end", step=60)
 
-# Yhdistetään päivä ja aika datetime-olioksi
+# Yhdistetään valinnat
 start = datetime.combine(d_start, t_start)
 end = datetime.combine(d_end, t_end)
 
-kwh = st.number_input("Ladattu määrä (kWh)", value=20.0)
-
-# 🔧 timezone fix
-start = start.replace(tzinfo=None)
-end = end.replace(tzinfo=None)
-
 # --- API ---
-def fetch_prices():
-    url = f"https://sahkotin.fi/prices?start={start.isoformat()}&end={end.isoformat()}&vat"
-    
-    r = requests.get(url)
-    data = r.json()
+def fetch_prices(start_dt, end_dt):
+    url = f"https://sahkotin.fi/prices?start={start_dt.isoformat()}&end={end_dt.isoformat()}&vat"
+    try:
+        r = requests.get(url, timeout=10)
+        data = r.json()
+        
+        prices = [p["value"] / 100 for p in data["prices"]] # snt -> €
+        times = [p["date"] for p in data["prices"]]
 
-    prices = []
-    times = []
+        return pd.DataFrame({
+            "time": pd.to_datetime(times).tz_localize(None),
+            "price": prices
+        })
+    except:
+        return pd.DataFrame()
 
-    for p in data["prices"]:
-        prices.append(p["value"] / 100)  # snt -> €
-        times.append(p["date"])
-
-    df = pd.DataFrame({
-        "time": pd.to_datetime(times).tz_localize(None),
-        "price": prices
-    })
-
-    return df
-
-def calc(df):
-    df = df[(df["time"] >= start) & (df["time"] <= end)]
-
-    if len(df) == 0:
+def calc(df, start_dt, end_dt):
+    df_filtered = df[(df["time"] >= start_dt) & (df["time"] <= end_dt)]
+    if len(df_filtered) == 0:
         return 0
 
-    energy = kwh / len(df)
-    total_energy_cost = 0
-    marginaali_eur = marginaali_snt / 100
+    energy_per_hour = kwh / len(df_filtered)
+    marginaali_eur = (lisa_hinta_snt if sopimus == "Pörssisähkö" else 0) / 100
+    
+    # Energian hinta
+    if sopimus == "Pörssisähkö":
+        total_energy_cost = sum((df_filtered["price"] + marginaali_eur) * energy_per_hour)
+    else:
+        total_energy_cost = kwh * (lisa_hinta_snt / 100)
 
-    for _, r in df.iterrows():
-        total_energy_cost += (r["price"] + marginaali_eur) * energy
-
+    # Siirto ja perusmaksu
     siirto_cost = (siirto_snt / 100) * kwh
-
-    days = (end - start).total_seconds() / 86400
+    days = max((end_dt - start_dt).total_seconds() / 86400, 0.01)
     perus_cost = (perusmaksu_snt / 100) * days
 
-    total = total_energy_cost + siirto_cost + perus_cost
-
-    return total
+    return total_energy_cost + siirto_cost + perus_cost
 
 # --- BUTTON ---
-if st.button("Laske"):
-
-    progress = st.progress(0)
-    st.write("🔋 Lasketaan...")
-
-    if sopimus == "Pörssisähkö":
-        try:
-            progress.progress(30)
-            df = fetch_prices()
-
-            progress.progress(70)
-            cost = calc(df)
-        except Exception as e:
-            st.error(f"Hintadatan haku epäonnistui: {e}")
-            st.stop()
-
+if st.button("Laske kustannus", type="primary"):
+    if start >= end:
+        st.error("Alkuajan on oltava ennen loppuaikaa!")
     else:
-        energy_cost = kwh * (hinta_snt / 100)
-        siirto_cost = kwh * (siirto_snt / 100)
+        with st.spinner("Haetaan hintoja..."):
+            if sopimus == "Pörssisähkö":
+                df = fetch_prices(start, end)
+                if df.empty:
+                    st.error("Hintojen haku epäonnistui.")
+                    st.stop()
+                cost = calc(df, start, end)
+            else:
+                cost = calc(None, start, end)
 
-        days = (end - start).total_seconds() / 86400
-        perus_cost = (perusmaksu_snt / 100) * days
+        st.success(f"Yhteensä: {cost:.2f} €")
+        
+        # Lisätietona keskihinta
+        st.info(f"Keskihinta tälle lataukselle: {(cost/kwh)*100:.2f} snt/kWh (sis. siirron)")
 
-        cost = energy_cost + siirto_cost + perus_cost
-
-    progress.progress(100)
-
-    st.success(f"Kustannus yhteensä: {cost:.2f} €")
-
-    # --- CSV ---
-    df_out = pd.DataFrame({
-        "alku": [start],
-        "loppu": [end],
-        "kwh": [kwh],
-        "yhteensa_eur": [round(cost, 2)]
-    })
-
-    st.download_button(
-        "Lataa CSV",
-        df_out.to_csv(index=False),
-        "lataus.csv"
-    )
+        # Latauslinkki
+        df_csv = pd.DataFrame({"alku": [start], "loppu": [end], "kwh": [kwh], "eur": [round(cost, 2)]})
+        st.download_button("Lataa raportti (CSV)", df_csv.to_csv(index=False), "latausraportti.csv")
