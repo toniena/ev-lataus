@@ -37,7 +37,6 @@ kwh = st.number_input("kWh", value=20.0)
 start = start.replace(tzinfo=None)
 end = end.replace(tzinfo=None)
 
-kwh = st.number_input("kWh", value=20.0)
 
 # --- API ---
 def fetch_prices():
