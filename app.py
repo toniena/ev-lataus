@@ -7,7 +7,6 @@ from datetime import datetime, timedelta
 st.set_page_config(page_title="EV Latauslaskuri Pro", layout="wide")
 
 # --- ALUSTUS (Session State) ---
-# Tämä varmistaa, että valitsemasi ajat pysyvät muistissa
 if 'init_done' not in st.session_state:
     now = datetime.now()
     st.session_state.d_start = now.date()
@@ -46,20 +45,19 @@ with col_b:
     d_end = st.date_input("Loppupäivä", key="d_end")
     t_end = st.time_input("Loppuaika", key="t_end", step=60)
 
-# Yhdistetään pvm ja kellonaika
 start_dt = datetime.combine(d_start, t_start)
 end_dt = datetime.combine(d_end, t_end)
 
 # --- FUNKTIOT ---
 def fetch_prices(s, e):
-    # Haetaan hintoja hieman laajemmin, jotta graafi näyttää hyvältä
     url = f"https://sahkotin.fi/prices?start={s.isoformat()}&end={e.isoformat()}&vat"
     try:
         r = requests.get(url, timeout=10)
         data = r.json()
         df = pd.DataFrame(data["prices"])
         df["date"] = pd.to_datetime(df["date"]).dt.tz_localize(None)
-        df["price_eur"] = df["value"] / 100 # muunnos snt -> €
+        # Säästetään sekä sentit (value) että eurot (price_eur)
+        df["price_eur"] = df["value"] / 100 
         return df
     except Exception:
         return pd.DataFrame()
@@ -77,7 +75,6 @@ if st.button("Laske kustannukset", type="primary", use_container_width=True):
             else:
                 # 1. Energian kustannus
                 if sopimus == "Pörssisähkö":
-                    # Rajataan data tarkasti valitulle välille
                     mask = (df['date'] >= start_dt) & (df['date'] <= end_dt)
                     df_filtered = df.loc[mask].copy()
                     
@@ -102,18 +99,17 @@ if st.button("Laske kustannukset", type="primary", use_container_width=True):
                 # --- VISUALISOINTI ---
                 st.divider()
                 
-                # Metric-kortit
                 m1, m2, m3 = st.columns(3)
                 m1.metric("Yhteensä (€)", f"{total_eur:.2f} €")
                 m2.metric("Keskihinta", f"{(total_eur/kwh)*100:.2f} snt/kWh")
                 m3.metric("Kesto", f"{int(latausaika_h)}h {int((latausaika_h*60)%60)}min")
 
-                # Graafi
+                # Graafi - MUUTETTU SNT/KWH
                 if sopimus == "Pörssisähkö" and not df.empty:
-                    st.subheader("Sähkön hinnan vaihtelu latauksen aikana")
-                    # Tehdään siistimpi graafi
-                    chart_df = df.rename(columns={"date": "Aika", "price_eur": "Hinta (€/kWh)"})
-                    st.area_chart(chart_df, x="Aika", y="Hinta (€/kWh)")
+                    st.subheader("Sähkön hinnan vaihtelu latauksen aikana (snt/kWh)")
+                    # Käytetään saraketta 'value', joka on senttejä
+                    chart_df = df.rename(columns={"date": "Aika", "value": "Hinta (snt/kWh)"})
+                    st.area_chart(chart_df, x="Aika", y="Hinta (snt/kWh)")
 
                 # Erittelytaulukko
                 st.subheader("Kustannusten erittely")
@@ -124,7 +120,6 @@ if st.button("Laske kustannukset", type="primary", use_container_width=True):
                 st.table(breakdown)
 
                 # --- RAPORTTI ---
-                # Luodaan kattava raportti CSV-latausta varten
                 report_dict = {
                     "Kuvaus": ["Lataustapahtuma"],
                     "Alku": [start_dt.strftime("%d.%m.%Y %H:%M")],
@@ -139,7 +134,7 @@ if st.button("Laske kustannukset", type="primary", use_container_width=True):
                 df_report = pd.DataFrame(report_dict)
                 
                 st.download_button(
-                    label="📥 Lataa yksityiskohtainen raportti (Excel-yhteensopiva)",
+                    label="📥 Lataa yksityiskohtainen raportti (CSV)",
                     data=df_report.to_csv(index=False, sep=";", encoding="utf-8-sig"),
                     file_name=f"lataus_{start_dt.strftime('%d%m%Y')}.csv",
                     mime="text/csv",
