@@ -97,18 +97,21 @@ if st.button("Laske"):
         except:
             st.error("Hintadatan haku epäonnistui")
             st.stop()
-else:
-    energy_cost = kwh * hinta
-    siirto_cost = siirto * kwh
 
-    days = (end - start).total_seconds() / 86400
-    perus_cost = perusmaksu * days
+    else:
+        energy_cost = kwh * hinta
+        siirto_cost = siirto * kwh
 
-    cost = energy_cost + siirto_cost + perus_cost
+        days = (end - start).total_seconds() / 86400
+        perus_cost = perusmaksu * days
+
+        cost = energy_cost + siirto_cost + perus_cost
+
     progress.progress(100)
 
     st.success(f"Kustannus: {cost:.2f} €")
 
+    # --- CSV ---
     df_out = pd.DataFrame({
         "alku": [start],
         "loppu": [end],
