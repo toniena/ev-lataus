@@ -14,7 +14,10 @@ hinta = 0
 if sopimus == "Kiinteä":
     hinta = st.number_input("Hinta €/kWh", value=0.10)
 
+start = st.datetime_input("Alku", datetime.now() - timedelta(hours=2))
+end = st.datetime_input("Loppu", datetime.now())
 
+# 🔧 timezone fix
 start = start.replace(tzinfo=None)
 end = end.replace(tzinfo=None)
 
@@ -23,6 +26,7 @@ kwh = st.number_input("kWh", value=20.0)
 # --- API ---
 def fetch_prices():
     url = f"https://sahkotin.fi/prices?start={start.isoformat()}&end={end.isoformat()}&vat"
+    
     r = requests.get(url)
     data = r.json()
 
@@ -33,14 +37,13 @@ def fetch_prices():
         prices.append(p["value"] / 100)  # snt -> €
         times.append(p["date"])
 
-    # Muodostetaan DataFrame ja poistetaan timezone
     df = pd.DataFrame({
         "time": pd.to_datetime(times).tz_localize(None),
         "price": prices
     })
 
     return df
-    
+
 # --- CALC ---
 def calc(df):
     df = df[(df["time"] >= start) & (df["time"] <= end)]
@@ -63,11 +66,15 @@ if st.button("Laske"):
     st.write("🔋 Lasketaan...")
 
     if sopimus == "Pörssisähkö":
-        progress.progress(30)
-        df = fetch_prices()
+        try:
+            progress.progress(30)
+            df = fetch_prices()
 
-        progress.progress(70)
-        cost = calc(df)
+            progress.progress(70)
+            cost = calc(df)
+        except:
+            st.error("Hintadatan haku epäonnistui")
+            st.stop()
     else:
         cost = kwh * hinta
 
