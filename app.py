@@ -98,7 +98,7 @@ if st.button("Laske"):
         except:
             st.error("Hintadatan haku epäonnistui")
             st.stop()
-    else:
+else:
     energy_cost = kwh * hinta
     siirto_cost = siirto * kwh
 
@@ -106,7 +106,6 @@ if st.button("Laske"):
     perus_cost = perusmaksu * days
 
     cost = energy_cost + siirto_cost + perus_cost
-
     progress.progress(100)
 
     st.success(f"Kustannus: {cost:.2f} €")
