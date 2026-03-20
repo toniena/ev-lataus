@@ -10,34 +10,53 @@ import io
 # Sivun asetukset
 st.set_page_config(page_title="EV Latauslaskuri Pro", layout="wide")
 
-# --- ALUSTUS ---
+# --- ALUSTUS (Session State) ---
 if 'history' not in st.session_state:
     st.session_state.history = []
+
+if 'init_done' not in st.session_state:
+    now = datetime.now()
+    st.session_state.d_start = now.date()
+    st.session_state.t_start = (now - timedelta(hours=2)).time()
+    st.session_state.d_end = now.date()
+    st.session_state.t_end = now.time()
+    st.session_state.init_done = True
 
 # --- PDF GENEROINTI -FUNKTIO ---
 def create_pdf(data):
     pdf = FPDF()
     pdf.add_page()
-    pdf.set_font("helvetica", "B", 20)
     
     # Otsikko
+    pdf.set_font("helvetica", "B", 24)
+    pdf.set_text_color(0, 102, 204)
     pdf.cell(0, 20, "LATAUSKUITTI", ln=True, align="C")
+    
     pdf.set_font("helvetica", "", 12)
+    pdf.set_text_color(0, 0, 0)
     pdf.ln(10)
     
-    # Tiedot
-    pdf.set_fill_color(240, 240, 240)
-    pdf.cell(95, 10, f"Pvm: {data['Pvm']}", border=1, fill=True)
-    pdf.cell(95, 10, f"Ladattu määrä: {data['kWh']} kWh", border=1, ln=True, fill=True)
-    pdf.cell(95, 10, f"Alku: {data['Alku']}", border=1)
-    pdf.cell(95, 10, f"Loppu: {data['Loppu']}", border=1, ln=True)
-    pdf.ln(10)
+    # Perustiedot taulukkona
+    pdf.set_fill_color(245, 245, 245)
+    pdf.set_font("helvetica", "B", 12)
+    pdf.cell(95, 10, " Lataustapahtuma", border=1, fill=True)
+    pdf.cell(95, 10, f" Pvm: {data['Pvm']}", border=1, ln=True, fill=True)
+    
+    pdf.set_font("helvetica", "", 12)
+    pdf.cell(95, 10, f" Alku: {data['Alku']}", border=1)
+    pdf.cell(95, 10, f" Loppu: {data['Loppu']}", border=1, ln=True)
+    pdf.cell(95, 10, f" Ladattu määrä:", border=1)
+    pdf.cell(95, 10, f" {data['kWh']} kWh", border=1, ln=True)
+    pdf.ln(15)
     
     # Kustannuserittely
     pdf.set_font("helvetica", "B", 14)
     pdf.cell(0, 10, "Kustannuserittely", ln=True)
-    pdf.set_font("helvetica", "", 12)
+    pdf.set_draw_color(0, 102, 204)
+    pdf.line(10, pdf.get_y(), 200, pdf.get_y())
+    pdf.ln(5)
     
+    pdf.set_font("helvetica", "", 12)
     pdf.cell(100, 10, "Sahkoenergia (sis. marginaali):")
     pdf.cell(0, 10, f"{data['Sahko (EUR)']:.2f} EUR", ln=True, align="R")
     
@@ -47,35 +66,47 @@ def create_pdf(data):
     pdf.cell(100, 10, "Perusmaksut:")
     pdf.cell(0, 10, f"{data['Perus (EUR)']:.2f} EUR", ln=True, align="R")
     
-    pdf.set_draw_color(0, 0, 0)
-    pdf.line(10, pdf.get_y(), 200, pdf.get_y())
-    
-    pdf.set_font("helvetica", "B", 14)
+    pdf.ln(5)
+    pdf.set_font("helvetica", "B", 16)
     pdf.cell(100, 15, "YHTEENSA:")
     pdf.cell(0, 15, f"{data['Yhteensa (EUR)']:.2f} EUR", ln=True, align="R")
-    pdf.ln(5)
     
-    # Grafiikka: Tehdään piirakkakaavio
+    # Piirakkakaavio
     labels = ['Energia', 'Siirto', 'Perus']
     sizes = [data['Sahko (EUR)'], data['Siirto (EUR)'], data['Perus (EUR)']]
-    colors = ['#ff9999','#66b3ff','#99ff99']
+    colors = ['#0066cc', '#3399ff', '#99ccff']
     
-    fig, ax = plt.subplots(figsize=(4, 4))
-    ax.pie(sizes, labels=labels, autopct='%1.1f%%', startangle=140, colors=colors)
-    ax.axis('equal')
+    plt.figure(figsize=(4, 4))
+    plt.pie(sizes, labels=labels, autopct='%1.1f%%', startangle=140, colors=colors)
+    plt.axis('equal')
     
-    # Tallennetaan kuva puskuriin
     img_buf = io.BytesIO()
-    plt.savefig(img_buf, format='png', bbox_inches='tight')
+    plt.savefig(img_buf, format='png', bbox_inches='tight', transparent=True)
     img_buf.seek(0)
-    plt.close(fig)
+    plt.close()
     
-    # Lisätään kuva PDF:ään
-    pdf.image(img_buf, x=55, y=pdf.get_y(), w=100)
+    pdf.image(img_buf, x=55, y=pdf.get_y() + 10, w=100)
     
-    return pdf.output()
+    # KORJAUS: Muutetaan bytearray -> bytes
+    return bytes(pdf.output())
 
-# --- SIVUPALKKI JA AIKAVALINTA (Kuten aiemmin) ---
+# --- FUNKTIOT ---
+def fetch_prices(s, e):
+    url = f"https://sahkotin.fi/prices?start={s.isoformat()}&end={e.isoformat()}&vat"
+    try:
+        r = requests.get(url, timeout=10)
+        data = r.json()
+        df = pd.DataFrame(data["prices"])
+        df["date"] = pd.to_datetime(df["date"]).dt.tz_localize(None)
+        df["snt_per_kwh"] = df["value"] / 10 
+        df["price_eur"] = df["snt_per_kwh"] / 100 
+        return df
+    except:
+        return pd.DataFrame()
+
+# --- UI ---
+st.title("🔋 Sähköauton latauskustannus")
+
 with st.sidebar:
     st.header("Asetukset")
     sopimus = st.radio("Sähkösopimus", ["Pörssisähkö", "Kiinteä"])
@@ -86,64 +117,84 @@ with st.sidebar:
     kwh_input = st.number_input("Ladattu määrä (kWh)", value=20.0)
 
 st.subheader("Latausajankohta")
-col_a, col_b = st.columns(2)
-with col_a:
-    d_start = st.date_input("Alkupäivä", datetime.now())
-    t_start = st.time_input("Alkuaika", (datetime.now() - timedelta(hours=2)).time(), step=60)
-with col_b:
-    d_end = st.date_input("Loppupäivä", datetime.now())
-    t_end = st.time_input("Loppuaika", datetime.now().time(), step=60)
+col1, col2 = st.columns(2)
+with col1:
+    d_start = st.date_input("Alkupäivä", key="d_start")
+    t_start = st.time_input("Alkuaika", key="t_start", step=60)
+with col2:
+    d_end = st.date_input("Loppupäivä", key="d_end")
+    t_end = st.time_input("Loppuaika", key="t_end", step=60)
 
 start_dt = datetime.combine(d_start, t_start)
 end_dt = datetime.combine(d_end, t_end)
 
-# --- LASKENTA ---
-if st.button("Laske ja luo kuitti", type="primary", use_container_width=True):
-    # (Tässä välissä on sama fetch_prices ja laskentalogiikka kuin edellisessä viestissä)
-    # Simuloidaan tässä nyt lopputuloksia koodin lyhentämiseksi:
-    
-    # --- API kutsu ja laskenta ---
-    url = f"https://sahkotin.fi/prices?start={start_dt.isoformat()}&end={end_dt.isoformat()}&vat"
-    r = requests.get(url)
-    if r.status_code == 200:
-        data_api = r.json()
-        prices = [p["value"]/10 for p in data_api["prices"]]
-        avg_price = sum(prices)/len(prices) if prices else 0
-        
-        energy_eur = kwh_input * ((avg_price + marginaali_snt) / 100)
-        siirto_eur = kwh_input * (siirto_snt / 100)
-        days = max((end_dt - start_dt).total_seconds() / 86400, 0.01)
-        perus_eur = (perus_snt / 100) * days
-        total_eur = energy_eur + siirto_eur + perus_eur
-        
-        kuitti_data = {
-            "Pvm": start_dt.strftime("%d.%m.%Y"),
-            "Alku": start_dt.strftime("%H:%M"),
-            "Loppu": end_dt.strftime("%H:%M"),
-            "kWh": kwh_input,
-            "Sahko (EUR)": energy_eur,
-            "Siirto (EUR)": siirto_eur,
-            "Perus (EUR)": perus_eur,
-            "Yhteensa (EUR)": total_eur
-        }
-        
-        st.session_state.history.append(kuitti_data)
-        
-        st.success(f"Laskettu! Kokonaishinta: {total_eur:.2f} €")
-        
-        # --- PDF LATAUSNAPPI ---
-        pdf_bytes = create_pdf(kuitti_data)
-        st.download_button(
-            label="📄 Lataa PDF-kuitti",
-            data=pdf_bytes,
-            file_name=f"kuitti_{start_dt.strftime('%d%m%Y')}.pdf",
-            mime="application/pdf",
-            use_container_width=True
-        )
+if st.button("Laske kustannukset ja luo kuitti", type="primary", use_container_width=True):
+    if start_dt >= end_dt:
+        st.error("Alkuajan on oltava ennen loppuaikaa!")
+    else:
+        df = fetch_prices(start_dt, end_dt)
+        if df.empty and sopimus == "Pörssisähkö":
+            st.error("Datan haku epäonnistui.")
+        else:
+            # Laskenta
+            latausaika_h = (end_dt - start_dt).total_seconds() / 3600
+            siirto_eur = kwh_input * (siirto_snt / 100)
+            perus_eur = (perus_snt / 100) * (latausaika_h / 24)
+            
+            if sopimus == "Pörssisähkö":
+                mask = (df['date'] >= start_dt - timedelta(minutes=14)) & (df['date'] <= end_dt)
+                df_filtered = df.loc[mask].copy()
+                avg_spot = df_filtered["price_eur"].mean() if not df_filtered.empty else 0
+                energy_eur = kwh_input * (avg_spot + (marginaali_snt / 100))
+            else:
+                energy_eur = kwh_input * (hinta_snt / 100)
+                df_filtered = pd.DataFrame()
 
-# --- HISTORIA (Näytetään kuten aiemmin) ---
+            total_eur = energy_eur + siirto_eur + perus_eur
+            
+            # Tallennus
+            kuitti_data = {
+                "Pvm": start_dt.strftime("%d.%m.%Y"),
+                "Alku": start_dt.strftime("%H:%M"),
+                "Loppu": end_dt.strftime("%H:%M"),
+                "kWh": kwh_input,
+                "Sahko (EUR)": energy_eur,
+                "Siirto (EUR)": siirto_eur,
+                "Perus (EUR)": perus_eur,
+                "Yhteensa (EUR)": total_eur,
+                "snt/kWh": (total_eur/kwh_input)*100
+            }
+            st.session_state.history.append(kuitti_data)
+            
+            # Tulokset
+            st.divider()
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Yhteensä", f"{total_eur:.2f} €")
+            m2.metric("Keskihinta", f"{(total_eur/kwh_input)*100:.2f} snt/kWh")
+            m3.metric("Kesto", f"{int(latausaika_h)}h {int((latausaika_h*60)%60)}min")
+
+            # Graafi
+            if not df_filtered.empty:
+                graph_df = df_filtered.copy()
+                graph_df["Total_snt"] = graph_df["snt_per_kwh"] + marginaali_snt + siirto_snt
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(x=graph_df["date"], y=graph_df["Total_snt"], fill='tozeroy', mode='lines+markers', line=dict(color='#0066cc')))
+                fig.update_layout(title="Hinnan kehitys (snt/kWh)", template="plotly_dark")
+                st.plotly_chart(fig, use_container_width=True)
+
+            # PDF Nappi
+            pdf_file = create_pdf(kuitti_data)
+            st.download_button(
+                label="📄 Lataa PDF-kuitti",
+                data=pdf_file,
+                file_name=f"kuitti_{start_dt.strftime('%d%m%Y')}.pdf",
+                mime="application/pdf",
+                use_container_width=True
+            )
+
+# --- HISTORIA ---
 if st.session_state.history:
     st.divider()
-    st.header("📜 Historia")
-    st.write(pd.DataFrame(st.session_state.history))
+    st.subheader("📜 Historia")
+    st.dataframe(pd.DataFrame(st.session_state.history), use_container_width=True)
     
