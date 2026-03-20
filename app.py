@@ -87,7 +87,7 @@ def create_pdf(data):
     
     pdf.image(img_buf, x=55, y=pdf.get_y() + 10, w=100)
     
-    # KORJAUS: Muutetaan bytearray -> bytes
+    # Muutetaan bytes-muotoon mobiiliyhteensopivuutta varten
     return bytes(pdf.output())
 
 # --- FUNKTIOT ---
@@ -128,7 +128,7 @@ with col2:
 start_dt = datetime.combine(d_start, t_start)
 end_dt = datetime.combine(d_end, t_end)
 
-if st.button("Laske kustannukset ja luo kuitti", type="primary", use_container_width=True):
+if st.button("Laske kustannukset", type="primary", use_container_width=True):
     if start_dt >= end_dt:
         st.error("Alkuajan on oltava ennen loppuaikaa!")
     else:
@@ -152,7 +152,7 @@ if st.button("Laske kustannukset ja luo kuitti", type="primary", use_container_w
 
             total_eur = energy_eur + siirto_eur + perus_eur
             
-            # Tallennus
+            # Tallennus session stateen
             kuitti_data = {
                 "Pvm": start_dt.strftime("%d.%m.%Y"),
                 "Alku": start_dt.strftime("%H:%M"),
@@ -165,7 +165,8 @@ if st.button("Laske kustannukset ja luo kuitti", type="primary", use_container_w
                 "snt/kWh": (total_eur/kwh_input)*100
             }
             st.session_state.history.append(kuitti_data)
-            
+            st.session_state.latest_result = kuitti_data
+
             # Tulokset
             st.divider()
             m1, m2, m3 = st.columns(3)
@@ -182,19 +183,45 @@ if st.button("Laske kustannukset ja luo kuitti", type="primary", use_container_w
                 fig.update_layout(title="Hinnan kehitys (snt/kWh)", template="plotly_dark")
                 st.plotly_chart(fig, use_container_width=True)
 
-            # PDF Nappi
-            pdf_file = create_pdf(kuitti_data)
-            st.download_button(
-                label="📄 Lataa PDF-kuitti",
-                data=pdf_file,
-                file_name=f"kuitti_{start_dt.strftime('%d%m%Y')}.pdf",
-                mime="application/pdf",
-                use_container_width=True
-            )
+# Jos laskenta on tehty, näytetään latausnapit
+if 'latest_result' in st.session_state:
+    st.subheader("Lataa tiedostot")
+    dl1, dl2 = st.columns(2)
+    
+    with dl1:
+        # PDF Lataus
+        pdf_file = create_pdf(st.session_state.latest_result)
+        st.download_button(
+            label="📄 Lataa PDF-kuitti",
+            data=pdf_file,
+            file_name=f"kuitti_{st.session_state.latest_result['Pvm']}.pdf",
+            mime="application/pdf",
+            use_container_width=True
+        )
+    
+    with dl2:
+        # CSV Lataus (yksittäinen raportti)
+        df_single = pd.DataFrame([st.session_state.latest_result])
+        st.download_button(
+            label="📊 Lataa CSV-raportti",
+            data=df_single.to_csv(index=False, sep=";", encoding="utf-8-sig"),
+            file_name=f"raportti_{st.session_state.latest_result['Pvm']}.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
 
 # --- HISTORIA ---
 if st.session_state.history:
     st.divider()
     st.subheader("📜 Historia")
-    st.dataframe(pd.DataFrame(st.session_state.history), use_container_width=True)
+    hist_df = pd.DataFrame(st.session_state.history)
+    st.dataframe(hist_df, use_container_width=True, hide_index=True)
+    
+    st.download_button(
+        label="📥 Lataa koko historia (CSV)",
+        data=hist_df.to_csv(index=False, sep=";", encoding="utf-8-sig"),
+        file_name="lataushistoria.csv",
+        mime="text/csv",
+        use_container_width=True
+    )
     
