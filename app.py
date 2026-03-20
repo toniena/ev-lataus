@@ -28,7 +28,7 @@ with st.sidebar:
         marginaali_snt = 0.0
     else:
         hinta_snt = 0.0
-        marginaali_snt = st.number_input("Marginaali snt/kWh", value=0.0, step=0.01)
+        marginaali_snt = st.number_input("Marginaali snt/kWh", value=5.0, step=0.01)
 
     st.divider()
     siirto_snt = st.number_input("Siirtohinta snt/kWh", value=5.75, step=0.1)
