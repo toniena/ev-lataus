@@ -16,7 +16,7 @@ if 'init_done' not in st.session_state:
     st.session_state.init_done = True
 
 st.title("🔋 Sähköauton latauskustannus")
-st.markdown("Analysoi latauksen hinta ja sähkön hintavaihtelut.")
+st.markdown("Analysoi latauksen hinta ja tarkista pörssisähkön tuntihinnat.")
 
 # --- SIVUPALKKI: ASETUKSET ---
 with st.sidebar:
@@ -50,45 +50,48 @@ end_dt = datetime.combine(d_end, t_end)
 
 # --- FUNKTIOT ---
 def fetch_prices(s, e):
+    # Haetaan hinnat. API palauttaa tuntikohtaiset hinnat.
     url = f"https://sahkotin.fi/prices?start={s.isoformat()}&end={e.isoformat()}&vat"
     try:
         r = requests.get(url, timeout=10)
         data = r.json()
         df = pd.DataFrame(data["prices"])
         df["date"] = pd.to_datetime(df["date"]).dt.tz_localize(None)
-        # Säästetään sekä sentit (value) että eurot (price_eur)
+        # 'value' on hinta snt/kWh sis. ALV
         df["price_eur"] = df["value"] / 100 
         return df
     except Exception:
         return pd.DataFrame()
 
 # --- LASKENTA JA TULOKSET ---
-if st.button("Laske kustannukset", type="primary", use_container_width=True):
+if st.button("Laske kustannukset ja hae pörssihinnat", type="primary", use_container_width=True):
     if start_dt >= end_dt:
         st.error("❌ Virhe: Alkuajan on oltava ennen loppuaikaa.")
     else:
-        with st.spinner("Haetaan hintatietoja..."):
+        with st.spinner("Haetaan tuntihintoja..."):
             df = fetch_prices(start_dt, end_dt)
             
             if sopimus == "Pörssisähkö" and df.empty:
-                st.error("Hintatietoja ei saatu haettua.")
+                st.error("Hintatietoja ei saatu haettua API:sta.")
             else:
-                # 1. Energian kustannus
+                # Rajataan data tarkasti valitulle välille graafia ja laskentaa varten
+                mask = (df['date'] >= (start_dt - timedelta(minutes=59))) & (df['date'] <= (end_dt + timedelta(minutes=59)))
+                df_plot = df.loc[mask].copy()
+                
+                # Laskentaan käytettävä filtteri (tunnit jotka osuvat lataukseen)
+                mask_calc = (df['date'] >= start_dt.replace(minute=0)) & (df['date'] <= end_dt)
+                df_filtered = df.loc[mask_calc].copy()
+
                 if sopimus == "Pörssisähkö":
-                    mask = (df['date'] >= start_dt) & (df['date'] <= end_dt)
-                    df_filtered = df.loc[mask].copy()
-                    
                     if not df_filtered.empty:
                         avg_spot_eur = df_filtered["price_eur"].mean()
                     else:
                         avg_spot_eur = 0
-                    
                     energy_cost_eur = kwh * (avg_spot_eur + (marginaali_snt / 100))
                 else:
                     avg_spot_eur = hinta_snt / 100
                     energy_cost_eur = kwh * avg_spot_eur
 
-                # 2. Siirto ja perusmaksu
                 siirto_cost_eur = kwh * (siirto_snt / 100)
                 latausaika_h = (end_dt - start_dt).total_seconds() / 3600
                 days = max(latausaika_h / 24, 0.01)
@@ -101,20 +104,23 @@ if st.button("Laske kustannukset", type="primary", use_container_width=True):
                 
                 m1, m2, m3 = st.columns(3)
                 m1.metric("Yhteensä (€)", f"{total_eur:.2f} €")
-                m2.metric("Keskihinta", f"{(total_eur/kwh)*100:.2f} snt/kWh")
-                m3.metric("Kesto", f"{int(latausaika_h)}h {int((latausaika_h*60)%60)}min")
+                m2.metric("Keskihinta (sis. siirto)", f"{(total_eur/kwh)*100:.2f} snt/kWh")
+                m3.metric("Latausaika", f"{int(latausaika_h)}h {int((latausaika_h*60)%60)}min")
 
-                # Graafi - MUUTETTU SNT/KWH
-                if sopimus == "Pörssisähkö" and not df.empty:
-                    st.subheader("Sähkön hinnan vaihtelu latauksen aikana (snt/kWh)")
-                    # Käytetään saraketta 'value', joka on senttejä
-                    chart_df = df.rename(columns={"date": "Aika", "value": "Hinta (snt/kWh)"})
-                    st.area_chart(chart_df, x="Aika", y="Hinta (snt/kWh)")
+                # Viivagraafi pörssihinnoista
+                if not df_plot.empty:
+                    st.subheader("Pörssisähkön tuntihinnat (snt/kWh)")
+                    chart_df = df_plot.rename(columns={"date": "Aika", "value": "snt/kWh"})
+                    # Käytetään viivagraafia (Line Chart)
+                    st.line_chart(chart_df, x="Aika", y="snt/kWh")
+                    
+                    with st.expander("Näytä tarkat tuntihinnat taulukkona"):
+                        st.dataframe(chart_df[["Aika", "snt/kWh"]].sort_values("Aika"), hide_index=True)
 
                 # Erittelytaulukko
                 st.subheader("Kustannusten erittely")
                 breakdown = pd.DataFrame({
-                    "Kohde": ["🔌 Energia (sis. marginaali)", "⛟ Siirto", "🗓️ Perusmaksut"],
+                    "Kohde": ["🔌 Energia", "⛟ Siirto", "🗓️ Perusmaksut"],
                     "Hinta (€)": [f"{energy_cost_eur:.2f} €", f"{siirto_cost_eur:.2f} €", f"{perus_cost_eur:.2f} €"]
                 })
                 st.table(breakdown)
@@ -134,9 +140,10 @@ if st.button("Laske kustannukset", type="primary", use_container_width=True):
                 df_report = pd.DataFrame(report_dict)
                 
                 st.download_button(
-                    label="📥 Lataa yksityiskohtainen raportti (CSV)",
+                    label="📥 Lataa raportti (CSV)",
                     data=df_report.to_csv(index=False, sep=";", encoding="utf-8-sig"),
                     file_name=f"lataus_{start_dt.strftime('%d%m%Y')}.csv",
                     mime="text/csv",
                     use_container_width=True
                 )
+                
