@@ -162,7 +162,6 @@ if st.button("Laske kustannukset", type="primary", use_container_width=True):
                 total_eur = energy_cost_eur + siirto_cost_eur + perus_cost_eur
                 total_avg_cost_per_kWh_snt = (total_eur / kwh_input) * 100
 
-                # MUUTTUJAN NIMI KORJATTU TÄHÄN: "Sahko (EUR)": energy_cost_eur
                 kuitti_data = {
                     "Pvm": start_dt.strftime("%d.%m.%Y"),
                     "Alku": start_dt.strftime("%H:%M"),
@@ -191,14 +190,34 @@ if st.button("Laske kustannukset", type="primary", use_container_width=True):
                     graph_df['hour_group'] = graph_df['date'].dt.floor('H')
                     graph_df['hourly_avg'] = graph_df.groupby('hour_group')['Total_snt'].transform('mean')
                     
+                    # --- FINGRID-STYLE TOOLTIP LOGIIKKA ---
+                    # Luodaan apusarakkeet varttihinnoille per tunti
+                    graph_df['min'] = graph_df['date'].dt.minute
+                    vartit = graph_df.pivot(index='hour_group', columns='min', values='Total_snt')
+                    # Varmistetaan että sarakkeet löytyvät (0, 15, 30, 45)
+                    for m in [0, 15, 30, 45]:
+                        if m not in vartit.columns: vartit[m] = 0.0
+                    
+                    vartit = vartit.rename(columns={0: 'v00', 15: 'v15', 30: 'v30', 45: 'v45'})
+                    graph_df = graph_df.merge(vartit, left_on='hour_group', right_index=True)
+
                     fig = go.Figure()
                     fig.add_trace(go.Scatter(
                         x=graph_df["date"], y=graph_df["Total_snt"],
                         fill='tozeroy', mode='lines+markers',
                         line=dict(color='#00CC96', width=2),
                         marker=dict(size=8),
-                        customdata=graph_df[["hourly_avg"]].values,
-                        hovertemplate="<b>Aika:</b> %{x|%H:%M}<br><b>15 min:</b> %{y:.2f} snt<br><b>Tunnin ka:</b> %{customdata[0]:.2f} snt<extra></extra>"
+                        customdata=graph_df[["hourly_avg", "v00", "v15", "v30", "v45"]].values,
+                        hovertemplate=(
+                            "<b>Tunnin keskihinta</b><br>" +
+                            "%{x|%H}.00 &nbsp;&nbsp; %{customdata[0]:.3f} snt/kWh<br><br>" +
+                            "<b>Varttihinnat</b><br>" +
+                            "%{x|%H}.00 &nbsp;&nbsp; %{customdata[1]:.3f} snt/kWh<br>" +
+                            "%{x|%H}.15 &nbsp;&nbsp; %{customdata[2]:.3f} snt/kWh<br>" +
+                            "%{x|%H}.30 &nbsp;&nbsp; %{customdata[3]:.3f} snt/kWh<br>" +
+                            "%{x|%H}.45 &nbsp;&nbsp; %{customdata[4]:.3f} snt/kWh" +
+                            "<extra></extra>"
+                        )
                     ))
                     
                     fig.add_shape(type="line", x0=graph_df["date"].min(), y0=total_avg_cost_per_kWh_snt, x1=graph_df["date"].max(), y1=total_avg_cost_per_kWh_snt,
