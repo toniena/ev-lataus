@@ -35,7 +35,7 @@ def create_pdf(data):
     pdf.cell(95, 10, f" Ladattu: {data['kWh']} kWh", border=1, ln=True)
     pdf.ln(10)
     pdf.set_font("helvetica", "B", 14)
-    pdf.cell(0, 10, "Kustannuserittely (sis. ALV 25,5%)", ln=True)
+    pdf.cell(0, 10, "Kustannuserittely (sis. ALV)", ln=True)
     pdf.set_font("helvetica", "", 12)
     pdf.cell(100, 10, "Sahkoenergia:")
     pdf.cell(0, 10, f"{data['Sahko (EUR)']:.2f} EUR", ln=True, align="R")
@@ -48,24 +48,25 @@ def create_pdf(data):
 
 # --- FUNKTIOT ---
 def fetch_prices(s, e):
-    # Haetaan hinta verottomana ja lasketaan 25.5% ALV itse
-    url = f"https://sahkotin.fi/prices?start={s.isoformat()}&end={e.isoformat()}"
+    # Käytetään API:n parametreja: 
+    # quarter (15min), fix (snt/kWh), vat (sis. ALV)
+    url = f"https://sahkotin.fi/prices?quarter&fix&vat&start={s.isoformat()}&end={e.isoformat()}"
     try:
         r = requests.get(url, timeout=10)
         data = r.json()
         df = pd.DataFrame(data["prices"])
         df["date"] = pd.to_datetime(df["date"]).dt.tz_localize(None)
         
-        # KORJAUS: Value on snt/kWh. Kerrotaan ALV:lla 1.255 (25,5%)
-        df["snt_per_kwh_alv"] = df["value"] * 1.255
-        df["price_eur"] = df["snt_per_kwh_alv"] / 100 
+        # Koska käytämme 'fix' ja 'vat', 'value' on nyt suoraan snt/kWh sis. ALV
+        df["snt_per_kwh"] = df["value"]
+        df["price_eur"] = df["snt_per_kwh"] / 100 
         return df
     except:
         return pd.DataFrame()
 
 # --- UI ---
 st.title("🔋 Sähköauton latauskustannus")
-st.info("💡 Hinnat on kalibroitu täsmäämään Fingridin kanssa (ALV 25,5 %).")
+st.info("💡 Käytössä aito 15 min varttihinnoittelu. Hinnat snt/kWh sis. ALV.")
 
 with st.sidebar:
     st.header("Asetukset")
@@ -89,12 +90,13 @@ start_dt = datetime.combine(d_start, t_start)
 end_dt = datetime.combine(d_end, t_end)
 
 if st.button("Laske kustannukset", type="primary", use_container_width=True):
-    with st.spinner("Päivitetään hintoja..."):
+    with st.spinner("Haetaan varttihintoja..."):
         df = fetch_prices(start_dt, end_dt)
         if df.empty and sopimus == "Pörssisähkö":
-            st.error("Hintatietoja ei löytynyt.")
+            st.error("Datan haku epäonnistui. Tarkista aikaväli.")
         else:
-            mask = (df['date'] >= start_dt.replace(minute=0)) & (df['date'] <= end_dt)
+            # Rajataan data latausvälille
+            mask = (df['date'] >= start_dt - timedelta(minutes=14)) & (df['date'] <= end_dt)
             df_f = df.loc[mask].copy().sort_values("date")
             
             h_kesto = (end_dt - start_dt).total_seconds() / 3600
@@ -120,45 +122,43 @@ if st.button("Laske kustannukset", type="primary", use_container_width=True):
             st.divider()
             m1, m2, m3 = st.columns(3)
             m1.metric("Yhteensä", f"{total_eur:.2f} €")
-            m2.metric("Keskihinta (sis. ALV)", f"{avg_total:.2f} snt/kWh")
+            m2.metric("Keskihinta (sis. kulut)", f"{avg_total:.2f} snt/kWh")
             m3.metric("Kesto", f"{int(h_kesto)}h {int((h_kesto*60)%60)}min")
 
             if not df_f.empty:
-                st.subheader("Hinnan kehitys (sis. ALV 25,5 %)")
+                st.subheader("Hinnan kehitys (sis. ALV)")
                 graph_df = df_f.copy()
-                graph_df["Total_snt"] = graph_df["snt_per_kwh_alv"] + marginaali_snt + siirto_snt
+                graph_df["Total_snt"] = graph_df["snt_per_kwh"] + marginaali_snt + siirto_snt
+                
+                # Ryhmittely tunneittain tooltipiä varten
                 graph_df['hour_group'] = graph_df['date'].dt.floor('H')
+                graph_df['h_avg_porssi'] = graph_df.groupby('hour_group')['snt_per_kwh'].transform('mean')
+                graph_df['h_avg_total'] = graph_df.groupby('hour_group')['Total_snt'].transform('mean')
                 
-                # Lasketaan tunnin keskiarvot
-                graph_df['hourly_spot_avg'] = graph_df.groupby('hour_group')['snt_per_kwh_alv'].transform('mean')
-                graph_df['hourly_total_avg'] = graph_df.groupby('hour_group')['Total_snt'].transform('mean')
-                
+                # Tooltip-vartit
                 graph_df['min'] = graph_df['date'].dt.minute
-                
-                # Varttidatan haku (puhdas pörssi ja kokonaishinta)
-                v_spot = graph_df.pivot(index='hour_group', columns='min', values='snt_per_kwh_alv')
+                v_porssi = graph_df.pivot(index='hour_group', columns='min', values='snt_per_kwh')
                 v_total = graph_df.pivot(index='hour_group', columns='min', values='Total_snt')
                 
                 for m in [0, 15, 30, 45]:
-                    if m not in v_spot.columns: 
-                        v_spot[m] = pd.NA
-                        v_total[m] = pd.NA
+                    if m not in v_porssi.columns: v_porssi[m] = pd.NA
+                    if m not in v_total.columns: v_total[m] = pd.NA
                 
-                v_spot = v_spot.rename(columns={0:'s00', 15:'s15', 30:'s30', 45:'s45'})
+                v_porssi = v_porssi.rename(columns={0:'s00', 15:'s15', 30:'s30', 45:'s45'})
                 v_total = v_total.rename(columns={0:'t00', 15:'t15', 30:'t30', 45:'t45'})
-                graph_df = graph_df.merge(v_spot[['s00','s15','s30','s45']], left_on='hour_group', right_index=True)
+                graph_df = graph_df.merge(v_porssi[['s00','s15','s30','s45']], left_on='hour_group', right_index=True)
                 graph_df = graph_df.merge(v_total[['t00','t15','t30','t45']], left_on='hour_group', right_index=True)
 
                 fig = go.Figure()
                 fig.add_trace(go.Scatter(
                     x=graph_df["date"], y=graph_df["Total_snt"],
-                    fill='tozeroy', mode='lines+markers', line=dict(color='#00CC96', width=2), marker=dict(size=8),
-                    customdata=graph_df[["hourly_spot_avg", "hourly_total_avg", 
-                                        "s00", "t00", "s15", "t15", "s30", "t30", "s45", "t45"]].values,
+                    fill='tozeroy', mode='lines+markers', line=dict(color='#00CC96', width=2),
+                    marker=dict(size=6),
+                    customdata=graph_df[["h_avg_porssi", "h_avg_total", "s00","t00","s15","t15","s30","t30","s45","t45"]].values,
                     hovertemplate=(
-                        "<b>Tunnin keskiarvo (Pörssi | Sis. kulut) sis. ALV</b><br>" +
+                        "<b>Tunnin keskihinta (Pörssi | Kokonaishinta)</b><br>" +
                         "%{x|%H}.00 &nbsp;&nbsp; %{customdata[0]:.3f} | %{customdata[1]:.2f} snt/kWh<br><br>" +
-                        "<b>Varttihinnat (Pörssi | Sis. kulut) sis. ALV</b><br>" +
+                        "<b>Varttihinnat (Pörssi | Kokonaishinta)</b><br>" +
                         "%{x|%H}.00 &nbsp;&nbsp; %{customdata[2]:.3f} | %{customdata[3]:.2f} snt/kWh<br>" +
                         "%{x|%H}.15 &nbsp;&nbsp; %{customdata[4]:.3f} | %{customdata[5]:.2f} snt/kWh<br>" +
                         "%{x|%H}.30 &nbsp;&nbsp; %{customdata[6]:.3f} | %{customdata[7]:.2f} snt/kWh<br>" +
@@ -166,22 +166,24 @@ if st.button("Laske kustannukset", type="primary", use_container_width=True):
                         "<extra></extra>"
                     )
                 ))
-                fig.add_shape(type="line", x0=graph_df["date"].min(), y0=avg_total, x1=graph_df["date"].max(), y1=avg_total, line=dict(color="Red", width=3, dash="dash"))
+                
+                # Keskiarvoviiva
+                fig.add_shape(type="line", x0=graph_df["date"].min(), y0=avg_total, x1=graph_df["date"].max(), y1=avg_total,
+                              line=dict(color="Red", width=2, dash="dash"))
+                
                 fig.update_layout(xaxis_title="Aika", yaxis_title="snt/kWh", template="plotly_dark", hovermode="x unified")
                 st.plotly_chart(fig, use_container_width=True)
 
 # LATAUSNAPIT JA HISTORIA
 if 'latest_result' in st.session_state:
-    st.subheader("Lataa tiedostot")
-    dl1, dl2 = st.columns(2)
-    with dl1:
+    st.subheader("Lataa raportit")
+    c_dl1, c_dl2 = st.columns(2)
+    with c_dl1:
         st.download_button("📄 PDF-kuitti", create_pdf(st.session_state.latest_result), f"kuitti_{datetime.now().strftime('%d%m%Y')}.pdf", "application/pdf", use_container_width=True)
-    with dl2:
+    with c_dl2:
         st.download_button("📊 CSV-raportti", pd.DataFrame([st.session_state.latest_result]).to_csv(index=False, sep=";", encoding="utf-8-sig"), "raportti.csv", "text/csv", use_container_width=True)
 
 if st.session_state.history:
     st.divider()
     st.subheader("📜 Historia")
-    hist_df = pd.DataFrame(st.session_state.history)
-    st.dataframe(hist_df, use_container_width=True, hide_index=True)
-    st.download_button("📥 Lataa koko historia (CSV)", hist_df.to_csv(index=False, sep=";", encoding="utf-8-sig"), "historia.csv", "text/csv", use_container_width=True)
+    st.dataframe(pd.DataFrame(st.session_state.history), use_container_width=True, hide_index=True)
