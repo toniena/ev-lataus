@@ -10,7 +10,7 @@ import io
 # Sivun asetukset
 st.set_page_config(page_title="EV Latauslaskuri Pro", layout="wide")
 
-# --- ALUSTUS (Session State) ---
+# --- ALUSTUS ---
 if 'history' not in st.session_state:
     st.session_state.history = []
 
@@ -57,7 +57,6 @@ def create_pdf(data):
     pdf.cell(100, 15, "YHTEENSA:")
     pdf.cell(0, 15, f"{data['Yhteensa (EUR)']:.2f} EUR", ln=True, align="R")
     
-    # Piirakkakaavio
     labels = ['Energia', 'Siirto', 'Perus']
     sizes = [max(data['Sahko (EUR)'], 0.01), max(data['Siirto (EUR)'], 0.01), max(data['Perus (EUR)'], 0.01)]
     plt.figure(figsize=(4, 4))
@@ -123,7 +122,7 @@ if st.button("Laske kustannukset", type="primary", use_container_width=True):
                 st.error("Hintatietoja ei saatu haettua.")
             else:
                 mask_calc = (df['date'] >= start_dt.replace(minute=0)) & (df['date'] <= end_dt)
-                df_filtered = df.loc[mask_calc].copy()
+                df_filtered = df.loc[mask_calc].copy().sort_values("date")
 
                 latausaika_h = (end_dt - start_dt).total_seconds() / 3600
                 siirto_cost_eur = kwh_input * (siirto_snt / 100)
@@ -157,29 +156,42 @@ if st.button("Laske kustannukset", type="primary", use_container_width=True):
                     graph_df = df_filtered.copy()
                     graph_df["Total_snt"] = graph_df["snt_per_kwh"] + marginaali_snt + siirto_snt
                     graph_df['hour_group'] = graph_df['date'].dt.floor('H')
-                    graph_df['hourly_avg'] = graph_df.groupby('hour_group')['Total_snt'].transform('mean')
                     
-                    # Tooltip-vartit
+                    # Lasketaan tunnin keskiarvot molemmille
+                    graph_df['hourly_spot_avg'] = graph_df.groupby('hour_group')['snt_per_kwh'].transform('mean')
+                    graph_df['hourly_total_avg'] = graph_df.groupby('hour_group')['Total_snt'].transform('mean')
+                    
+                    # Valmistellaan varttitiedot (puhdas ja total)
                     graph_df['min'] = graph_df['date'].dt.minute
-                    vartit = graph_df.pivot(index='hour_group', columns='min', values='Total_snt')
+                    
+                    # Pivotoidaan molemmat arvot
+                    v_total = graph_df.pivot(index='hour_group', columns='min', values='Total_snt').fillna(method='ffill', axis=1)
+                    v_spot = graph_df.pivot(index='hour_group', columns='min', values='snt_per_kwh').fillna(method='ffill', axis=1)
+                    
                     for m in [0, 15, 30, 45]:
-                        if m not in vartit.columns: vartit[m] = 0.0
-                    vartit = vartit.rename(columns={0:'v00', 15:'v15', 30:'v30', 45:'v45'})
-                    graph_df = graph_df.merge(vartit, left_on='hour_group', right_index=True)
+                        if m not in v_total.columns: v_total[m] = graph_df['hourly_total_avg']
+                        if m not in v_spot.columns: v_spot[m] = graph_df['hourly_spot_avg']
+                    
+                    v_total = v_total.rename(columns={0:'t00', 15:'t15', 30:'t30', 45:'t45'})
+                    v_spot = v_spot.rename(columns={0:'s00', 15:'s15', 30:'s30', 45:'s45'})
+                    
+                    graph_df = graph_df.merge(v_total, left_on='hour_group', right_index=True)
+                    graph_df = graph_df.merge(v_spot, left_on='hour_group', right_index=True)
 
                     fig = go.Figure()
                     fig.add_trace(go.Scatter(
                         x=graph_df["date"], y=graph_df["Total_snt"],
                         fill='tozeroy', mode='lines+markers', line=dict(color='#00CC96', width=2), marker=dict(size=8),
-                        customdata=graph_df[["hourly_avg", "v00", "v15", "v30", "v45", "snt_per_kwh"]].values,
+                        customdata=graph_df[["hourly_spot_avg", "hourly_total_avg", 
+                                            "s00", "t00", "s15", "t15", "s30", "t30", "s45", "t45"]].values,
                         hovertemplate=(
-                            "<b>Pörssihinta (puhdas):</b> %{customdata[5]:.3f} snt/kWh<br>" +
-                            "<b>Tunnin ka (sis. kulut):</b> %{customdata[0]:.2f} snt/kWh<br><br>" +
-                            "<b>Varttihinnat (sis. kulut)</b><br>" +
-                            "%{x|%H}.00 &nbsp;&nbsp; %{customdata[1]:.3f} snt/kWh<br>" +
-                            "%{x|%H}.15 &nbsp;&nbsp; %{customdata[2]:.3f} snt/kWh<br>" +
-                            "%{x|%H}.30 &nbsp;&nbsp; %{customdata[3]:.3f} snt/kWh<br>" +
-                            "%{x|%H}.45 &nbsp;&nbsp; %{customdata[4]:.3f} snt/kWh" +
+                            "<b>Tunnin keskiarvo (Pörssi | Sis. kulut)</b><br>" +
+                            "%{x|%H}.00 &nbsp;&nbsp; %{customdata[0]:.3f} | %{customdata[1]:.2f} snt/kWh<br><br>" +
+                            "<b>Varttihinnat (Pörssi | Sis. kulut)</b><br>" +
+                            "%{x|%H}.00 &nbsp;&nbsp; %{customdata[2]:.3f} | %{customdata[3]:.2f} snt/kWh<br>" +
+                            "%{x|%H}.15 &nbsp;&nbsp; %{customdata[4]:.3f} | %{customdata[5]:.2f} snt/kWh<br>" +
+                            "%{x|%H}.30 &nbsp;&nbsp; %{customdata[6]:.3f} | %{customdata[7]:.2f} snt/kWh<br>" +
+                            "%{x|%H}.45 &nbsp;&nbsp; %{customdata[8]:.3f} | %{customdata[9]:.2f} snt/kWh" +
                             "<extra></extra>"
                         )
                     ))
