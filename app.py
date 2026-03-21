@@ -29,29 +29,36 @@ def create_pdf(data):
     pdf.set_font("helvetica", "B", 24)
     pdf.set_text_color(0, 102, 204)
     pdf.cell(0, 20, "LATAUSKUITTI", ln=True, align="C")
+    
     pdf.set_font("helvetica", "", 12)
     pdf.set_text_color(0, 0, 0)
     pdf.ln(10)
+    
     pdf.set_fill_color(245, 245, 245)
     pdf.set_font("helvetica", "B", 12)
     pdf.cell(95, 10, " Lataustapahtuma", border=1, fill=True)
     pdf.cell(95, 10, f" Pvm: {data['Pvm']}", border=1, ln=True, fill=True)
+    
     pdf.set_font("helvetica", "", 12)
     pdf.cell(95, 10, f" Alku: {data['Alku']}", border=1)
     pdf.cell(95, 10, f" Loppu: {data['Loppu']}", border=1, ln=True)
     pdf.cell(95, 10, f" Ladattu määrä: {data['kWh']} kWh", border=1, ln=True)
     pdf.ln(15)
+    
     pdf.set_font("helvetica", "B", 14)
     pdf.cell(0, 10, "Kustannuserittely (sis. ALV)", ln=True)
     pdf.set_draw_color(0, 102, 204)
     pdf.line(10, pdf.get_y(), 200, pdf.get_y())
     pdf.ln(5)
+    
+    pdf.set_font("helvetica", "", 12)
     pdf.cell(100, 10, "Sahkoenergia:")
     pdf.cell(0, 10, f"{data['Sahko (EUR)']:.2f} EUR", ln=True, align="R")
     pdf.cell(100, 10, "Siirtomaksu:")
     pdf.cell(0, 10, f"{data['Siirto (EUR)']:.2f} EUR", ln=True, align="R")
     pdf.cell(100, 10, "Perusmaksut:")
     pdf.cell(0, 10, f"{data['Perus (EUR)']:.2f} EUR", ln=True, align="R")
+    
     pdf.ln(5)
     pdf.set_font("helvetica", "B", 16)
     pdf.cell(100, 15, "YHTEENSA:")
@@ -71,14 +78,13 @@ def create_pdf(data):
 
 # --- FUNKTIOT ---
 def fetch_prices(s, e):
-    # &vat hakee hinnan verollisena (Suomessa pörssisähkössä ALV 25,5%)
     url = f"https://sahkotin.fi/prices?start={s.isoformat()}&end={e.isoformat()}&vat"
     try:
         r = requests.get(url, timeout=10)
         data = r.json()
         df = pd.DataFrame(data["prices"])
         df["date"] = pd.to_datetime(df["date"]).dt.tz_localize(None)
-        # snt/kWh laskenta. API palauttaa luvun, joka on 10x snt/kWh (eli €/MWh)
+        # snt/kWh. API palauttaa luvun, joka on 10x snt/kWh (eli €/MWh)
         df["snt_per_kwh"] = df["value"] / 10 
         df["price_eur"] = df["snt_per_kwh"] / 100 
         return df
@@ -87,7 +93,7 @@ def fetch_prices(s, e):
 
 # --- UI ---
 st.title("🔋 Sähköauton latauskustannus")
-st.info("💡 Kaikki hinnat sisältävät voimassa olevan arvonlisäveron (ALV 25,5 %).")
+st.info("💡 Kaikki sovelluksen hinnat on ilmoitettu sisältäen ALV:n (25,5 %).")
 
 with st.sidebar:
     st.header("Asetukset")
@@ -116,6 +122,7 @@ with c2:
 start_dt = datetime.combine(d_start, t_start)
 end_dt = datetime.combine(d_end, t_end)
 
+# --- LASKENTA ---
 if st.button("Laske kustannukset", type="primary", use_container_width=True):
     if start_dt >= end_dt:
         st.error("❌ Virhe: Alkuajan on oltava ennen loppuaikaa.")
@@ -161,34 +168,27 @@ if st.button("Laske kustannukset", type="primary", use_container_width=True):
                     graph_df["Total_snt"] = graph_df["snt_per_kwh"] + marginaali_snt + siirto_snt
                     graph_df['hour_group'] = graph_df['date'].dt.floor('H')
                     
-                    # Lasketaan tunnin keskiarvot
+                    # Lasketaan tunnin keskiarvot (sis. ALV)
                     graph_df['hourly_spot_avg'] = graph_df.groupby('hour_group')['snt_per_kwh'].transform('mean')
                     graph_df['hourly_total_avg'] = graph_df.groupby('hour_group')['Total_snt'].transform('mean')
                     
                     graph_df['min'] = graph_df['date'].dt.minute
                     
-                    # Korjattu varttidatan käsittely (NaN-esto):
-                    # Jos data on tuntitietoina, täytetään puuttuvat vartit tunnin arvolla
+                    # Varttidatan käsittely (NaN palautettu)
+                    # Pivotoidaan arvot, mutta EI täytetä automaattisesti jos data puuttuu
                     v_total = graph_df.pivot(index='hour_group', columns='min', values='Total_snt')
                     v_spot = graph_df.pivot(index='hour_group', columns='min', values='snt_per_kwh')
                     
-                    # Varmistetaan että sarakkeet 0, 15, 30, 45 löytyvät
+                    # Varmistetaan että sarakkeet 0, 15, 30, 45 löytyvät, mutta jätetään ne NaNiksi jos tietoa ei ole
                     for m in [0, 15, 30, 45]:
                         if m not in v_total.columns: 
-                            # Jos vartti puuttuu, käytetään tunnin keskiarvoa
-                            hour_avg_total = graph_df.groupby('hour_group')['Total_snt'].first()
-                            hour_avg_spot = graph_df.groupby('hour_group')['snt_per_kwh'].first()
-                            v_total[m] = hour_avg_total
-                            v_spot[m] = hour_avg_spot
-                        else:
-                            # Jos vartti on olemassa mutta se on NaN, täytetään se
-                            v_total[m] = v_total[m].fillna(graph_df.groupby('hour_group')['Total_snt'].transform('first'))
-                            v_spot[m] = v_spot[m].fillna(graph_df.groupby('hour_group')['snt_per_kwh'].transform('first'))
+                            v_total[m] = pd.NA
+                            v_spot[m] = pd.NA
                     
                     v_total = v_total.rename(columns={0:'t00', 15:'t15', 30:'t30', 45:'t45'})
                     v_spot = v_spot.rename(columns={0:'s00', 15:'s15', 30:'s30', 45:'s45'})
                     
-                    graph_df = graph_df.merge(v_total[[ 't00', 't15', 't30', 't45']], left_on='hour_group', right_index=True)
+                    graph_df = graph_df.merge(v_total[['t00', 't15', 't30', 't45']], left_on='hour_group', right_index=True)
                     graph_df = graph_df.merge(v_spot[['s00', 's15', 's30', 's45']], left_on='hour_group', right_index=True)
 
                     fig = go.Figure()
@@ -198,9 +198,9 @@ if st.button("Laske kustannukset", type="primary", use_container_width=True):
                         customdata=graph_df[["hourly_spot_avg", "hourly_total_avg", 
                                             "s00", "t00", "s15", "t15", "s30", "t30", "s45", "t45"]].values,
                         hovertemplate=(
-                            "<b>Tunnin keskiarvo (Pörssi | Sis. kulut)</b><br>" +
+                            "<b>Tunnin keskiarvo (Pörssi | Sis. kulut) sis. ALV</b><br>" +
                             "%{x|%H}.00 &nbsp;&nbsp; %{customdata[0]:.3f} | %{customdata[1]:.2f} snt/kWh<br><br>" +
-                            "<b>Varttihinnat (Pörssi | Sis. kulut)</b><br>" +
+                            "<b>Varttihinnat (Pörssi | Sis. kulut) sis. ALV</b><br>" +
                             "%{x|%H}.00 &nbsp;&nbsp; %{customdata[2]:.3f} | %{customdata[3]:.2f} snt/kWh<br>" +
                             "%{x|%H}.15 &nbsp;&nbsp; %{customdata[4]:.3f} | %{customdata[5]:.2f} snt/kWh<br>" +
                             "%{x|%H}.30 &nbsp;&nbsp; %{customdata[6]:.3f} | %{customdata[7]:.2f} snt/kWh<br>" +
