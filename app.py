@@ -10,7 +10,7 @@ import io
 # Sivun asetukset
 st.set_page_config(page_title="EV Latauslaskuri Pro", layout="wide")
 
-# --- ALUSTUS ---
+# --- ALUSTUS (Session State) ---
 if 'history' not in st.session_state:
     st.session_state.history = []
 
@@ -42,7 +42,7 @@ def create_pdf(data):
     pdf.cell(95, 10, f" Ladattu määrä: {data['kWh']} kWh", border=1, ln=True)
     pdf.ln(15)
     pdf.set_font("helvetica", "B", 14)
-    pdf.cell(0, 10, "Kustannuserittely", ln=True)
+    pdf.cell(0, 10, "Kustannuserittely (sis. ALV)", ln=True)
     pdf.set_draw_color(0, 102, 204)
     pdf.line(10, pdf.get_y(), 200, pdf.get_y())
     pdf.ln(5)
@@ -57,6 +57,7 @@ def create_pdf(data):
     pdf.cell(100, 15, "YHTEENSA:")
     pdf.cell(0, 15, f"{data['Yhteensa (EUR)']:.2f} EUR", ln=True, align="R")
     
+    # Piirakkakaavio
     labels = ['Energia', 'Siirto', 'Perus']
     sizes = [max(data['Sahko (EUR)'], 0.01), max(data['Siirto (EUR)'], 0.01), max(data['Perus (EUR)'], 0.01)]
     plt.figure(figsize=(4, 4))
@@ -70,12 +71,14 @@ def create_pdf(data):
 
 # --- FUNKTIOT ---
 def fetch_prices(s, e):
+    # &vat hakee hinnan verollisena (Suomessa pörssisähkössä ALV 25,5%)
     url = f"https://sahkotin.fi/prices?start={s.isoformat()}&end={e.isoformat()}&vat"
     try:
         r = requests.get(url, timeout=10)
         data = r.json()
         df = pd.DataFrame(data["prices"])
         df["date"] = pd.to_datetime(df["date"]).dt.tz_localize(None)
+        # snt/kWh laskenta. API palauttaa luvun, joka on 10x snt/kWh (eli €/MWh)
         df["snt_per_kwh"] = df["value"] / 10 
         df["price_eur"] = df["snt_per_kwh"] / 100 
         return df
@@ -84,20 +87,21 @@ def fetch_prices(s, e):
 
 # --- UI ---
 st.title("🔋 Sähköauton latauskustannus")
+st.info("💡 Kaikki hinnat sisältävät voimassa olevan arvonlisäveron (ALV 25,5 %).")
 
 with st.sidebar:
     st.header("Asetukset")
     sopimus = st.radio("Sähkösopimus", ["Pörssisähkö", "Kiinteä"])
     if sopimus == "Kiinteä":
-        hinta_snt = st.number_input("Sähkön hinta snt/kWh", value=10.0, step=0.1)
+        hinta_snt = st.number_input("Sähkön hinta snt/kWh (sis. ALV)", value=10.0, step=0.1)
         marginaali_snt = 0.0
     else:
         hinta_snt = 0.0
-        marginaali_snt = st.number_input("Marginaali snt/kWh", value=0.0, step=0.01)
+        marginaali_snt = st.number_input("Marginaali snt/kWh (sis. ALV)", value=0.0, step=0.01)
 
     st.divider()
-    siirto_snt = st.number_input("Siirtohinta snt/kWh", value=5.75, step=0.01)
-    perus_snt = st.number_input("Perusmaksu snt/päivä", value=17.0, step=1.0)
+    siirto_snt = st.number_input("Siirtohinta snt/kWh (sis. ALV)", value=5.75, step=0.01)
+    perus_snt = st.number_input("Perusmaksu snt/päivä (sis. ALV)", value=17.0, step=1.0)
     kwh_input = st.number_input("Ladattu määrä (kWh)", value=20.0, step=0.5)
 
 st.subheader("Latausajankohta")
@@ -148,35 +152,44 @@ if st.button("Laske kustannukset", type="primary", use_container_width=True):
                 st.divider()
                 m1, m2, m3 = st.columns(3)
                 m1.metric("Kokonaiskustannus", f"{total_eur:.2f} €")
-                m2.metric("Keskihinta (sis. kulut)", f"{total_avg_snt:.2f} snt/kWh")
+                m2.metric("Keskihinta (sis. ALV + kulut)", f"{total_avg_snt:.2f} snt/kWh")
                 m3.metric("Kesto", f"{int(latausaika_h)}h {int((latausaika_h*60)%60)}min")
 
                 if not df_filtered.empty:
-                    st.subheader("Hinnan kehitys (snt/kWh)")
+                    st.subheader("Hinnan kehitys (snt/kWh, sis. ALV)")
                     graph_df = df_filtered.copy()
                     graph_df["Total_snt"] = graph_df["snt_per_kwh"] + marginaali_snt + siirto_snt
                     graph_df['hour_group'] = graph_df['date'].dt.floor('H')
                     
-                    # Lasketaan tunnin keskiarvot molemmille
+                    # Lasketaan tunnin keskiarvot
                     graph_df['hourly_spot_avg'] = graph_df.groupby('hour_group')['snt_per_kwh'].transform('mean')
                     graph_df['hourly_total_avg'] = graph_df.groupby('hour_group')['Total_snt'].transform('mean')
                     
-                    # Valmistellaan varttitiedot (puhdas ja total)
                     graph_df['min'] = graph_df['date'].dt.minute
                     
-                    # Pivotoidaan molemmat arvot
-                    v_total = graph_df.pivot(index='hour_group', columns='min', values='Total_snt').fillna(method='ffill', axis=1)
-                    v_spot = graph_df.pivot(index='hour_group', columns='min', values='snt_per_kwh').fillna(method='ffill', axis=1)
+                    # Korjattu varttidatan käsittely (NaN-esto):
+                    # Jos data on tuntitietoina, täytetään puuttuvat vartit tunnin arvolla
+                    v_total = graph_df.pivot(index='hour_group', columns='min', values='Total_snt')
+                    v_spot = graph_df.pivot(index='hour_group', columns='min', values='snt_per_kwh')
                     
+                    # Varmistetaan että sarakkeet 0, 15, 30, 45 löytyvät
                     for m in [0, 15, 30, 45]:
-                        if m not in v_total.columns: v_total[m] = graph_df['hourly_total_avg']
-                        if m not in v_spot.columns: v_spot[m] = graph_df['hourly_spot_avg']
+                        if m not in v_total.columns: 
+                            # Jos vartti puuttuu, käytetään tunnin keskiarvoa
+                            hour_avg_total = graph_df.groupby('hour_group')['Total_snt'].first()
+                            hour_avg_spot = graph_df.groupby('hour_group')['snt_per_kwh'].first()
+                            v_total[m] = hour_avg_total
+                            v_spot[m] = hour_avg_spot
+                        else:
+                            # Jos vartti on olemassa mutta se on NaN, täytetään se
+                            v_total[m] = v_total[m].fillna(graph_df.groupby('hour_group')['Total_snt'].transform('first'))
+                            v_spot[m] = v_spot[m].fillna(graph_df.groupby('hour_group')['snt_per_kwh'].transform('first'))
                     
                     v_total = v_total.rename(columns={0:'t00', 15:'t15', 30:'t30', 45:'t45'})
                     v_spot = v_spot.rename(columns={0:'s00', 15:'s15', 30:'s30', 45:'s45'})
                     
-                    graph_df = graph_df.merge(v_total, left_on='hour_group', right_index=True)
-                    graph_df = graph_df.merge(v_spot, left_on='hour_group', right_index=True)
+                    graph_df = graph_df.merge(v_total[[ 't00', 't15', 't30', 't45']], left_on='hour_group', right_index=True)
+                    graph_df = graph_df.merge(v_spot[['s00', 's15', 's30', 's45']], left_on='hour_group', right_index=True)
 
                     fig = go.Figure()
                     fig.add_trace(go.Scatter(
