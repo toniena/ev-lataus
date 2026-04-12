@@ -131,7 +131,7 @@ if st.button("Laske kustannukset", type="primary", use_container_width=True):
                 graph_df["Total_snt"] = graph_df["snt_per_kwh"] + marginaali_snt + siirto_snt
                 
                 # Ryhmittely tunneittain tooltipiä varten
-                graph_df['hour_group'] = graph_df['date'].dt.floor('H')
+                graph_df['hour_group'] = graph_df['date'].dt.floor('h')
                 graph_df['h_avg_porssi'] = graph_df.groupby('hour_group')['snt_per_kwh'].transform('mean')
                 graph_df['h_avg_total'] = graph_df.groupby('hour_group')['Total_snt'].transform('mean')
                 
